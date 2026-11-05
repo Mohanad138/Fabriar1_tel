@@ -8,7 +8,7 @@ import subprocess
 import difflib
 from telethon import TelegramClient
 from telethon.sessions import StringSession
-from telethon.tl.types import MessageMediaDocument, MessageMediaWebPage
+from telethon.tl.types import (MessageMediaPhoto, MessageMediaDocument, MessageMediaWebPage)
 import requests
 
 TG_API_ID = int(os.getenv("TG_API_ID"))
@@ -18,6 +18,9 @@ GEMINI_KEY = os.getenv("GEMINI_KEY_FABRIZ")
 
 GEMINI_MODEL = "gemini-flash-lite-latest"
 STATE_FILE = "relay_state.json"
+
+# ⚠️ ضعه على True أول مرة لتجربة نشر آخر 5 منشورات (بما فيها الصور)، ثم أرجعه False
+TEST_MODE = True 
 
 CHANNELS = {
     -1001344466508: {
@@ -74,6 +77,34 @@ def commit_state():
     except Exception as e:
         print(f"⚠️ git error: {e}")
 
+def _is_small_thumbnail_photo(photo):
+    # يستثني صور "الأفاتار" المربعة الصغيرة الخاصة بمعاينة الحساب
+    try:
+        dims = [(getattr(s, "w", 0), getattr(s, "h", 0)) for s in photo.sizes if hasattr(s, "w")]
+        if not dims: return False
+        max_w = max(w for w, _ in dims)
+        max_h = max(h for _, h in dims)
+        if max_w < 250 and max_h < 250: return True
+        if max_w > 0 and max_h > 0:
+            ratio = max_w / max_h
+            if 0.85 <= ratio <= 1.18 and max(max_w, max_h) <= 800: return True
+        return False
+    except Exception: return False
+
+def _is_usable_media_msg(m):
+    # يجلب أي صورة حقيقية (سواء مرفقة مباشرة أو كمعاينة رابط)
+    media = m.media
+    if isinstance(media, (MessageMediaPhoto, MessageMediaDocument)): return True
+    if isinstance(media, MessageMediaWebPage):
+        wp = getattr(media, "webpage", None)
+        photo = getattr(wp, "photo", None)
+        if photo and not _is_small_thumbnail_photo(photo): return True
+    return False
+
+def _media_payload(m):
+    if isinstance(m.media, MessageMediaWebPage): return m.photo if m.photo else None
+    return m.media
+
 def _message_has_any_video(m):
     media = m.media
     if isinstance(media, MessageMediaDocument): return bool(m.video) or bool(getattr(m, "gif", None))
@@ -126,17 +157,68 @@ def call_gemini(prompt, api_key, max_retries=3):
             time.sleep(2 ** attempt)
 
 def call_fabrizio(text, api_key):
-    prompt = f"""أنت تنقل تغريدات فابريزيو رومانو الرسمي.
-انشر أي خبر كروي ملموس (صفقات، إصابات، جوائز). (should_post=true).
-الترجمة: بصيغة المتكلم (أنا أؤكد، علمت). بأسلوب طبيعي جداً كأنه كتب بالعربي من الأصل.
-أبقِ "Here we go" بالإنجليزية. لا تضع روابط نهائياً.
-النص: {text}
-JSON: {{"should_post": true/false, "text": "النص"}}"""
+    prompt = f"""أنت محرر لصفحة عربية تنقل كل منشورات حساب فابريزيو رومانو الرسمي بالعربية.
+
+معايير النشر (فلتر معتدل — مو صارم ومو مفتوح بالكامل):
+- انشر (should_post = true) أي منشور فيه **معلومة كروية ملموسة وجديدة** عن لاعب أو مدرب أو نادي محدد:
+  انتقال أو صفقة أو تجديد عقد (مع مرحلة واضحة: مفاوضات متقدمة، اتفاق، رسمي)، إصابة أو غياب لاعب مهم،
+  تشكيلة أو نتيجة مباراة أو حدث مهم بمباراة، قرار أو إعلان رسمي، تصريح له قيمة إخبارية فعلية،
+  إحصائية لافتة، أو تغيير مدرب/إدارة.
+- **أخبار الجوائز الفردية دايماً تُنشر**: الكرة الذهبية (Ballon d'Or)، أفضل لاعب، أي جائزة فردية —
+  فوز، ترشيح، توقع، تحليل — حتى لو كان النص قصير أو بصيغة "BREAKING" أو بأحرف كبيرة.
+- أي منشور يحتوي على عبارة "Here we go" يُنشر دائماً بلا استثناء.
+- اجعل should_post = false للأنواع التالية فقط (هامشية أو بلا قيمة إخبارية):
+  * إعلان تجاري مدفوع أو ترويج لمنتج/تطبيق/خدمة/رعاية.
+  * ترويج لبودكاست/برنامج فابريزيو نفسه (زي "New pod on"، دعوة للاستماع).
+  * تشويق بلا معلومة فعلية ("more to follow"، "big news coming"، "talks ongoing" بدون أي تفصيل
+    أو مرحلة أو اسم محدد).
+  * منشورات تفاعلية/ترفيهية بلا خبر: تهنئة، عيد ميلاد، احتفال، ردود فعل جماهير، دردشة، طرائف.
+  * رأي أو تحليل عام بلا حقيقة جديدة، أو تكرار لمعلومة معروفة سبق نشرها بدون أي جديد.
+  * أي محتوى بعيد عن كرة القدم أو شخصي.
+- قرار الفيديو والصور يتخذ بشكل منفصل بالكود، مو من عندك — لا تجعل should_post = false بسبب إن
+  المنشور "يشبه فيديو" أو قصير. خبر قصير حقيقي (فوز بجائزة، نتيجة، صفقة) يبقى should_post = true.
+- عند الشك بين خبر حقيقي متوسط الأهمية وخبر هامشي: إذا فيه اسم محدد + تطور فعلي → انشر، وإذا ما فيه
+  إلا انطباع أو تشويق عام → لا تنشر.
+
+الترجمة (فقط إذا should_post = true):
+- **أمانة كاملة للنص الأصلي:** اكتب الخبر بنفس معناه ونفس ترتيب أفكاره وفقراته وأسطره وإيموجياته
+  بالضبط كما كتبه فابريزيو بحسابه الأصلي، بس بعربي طبيعي كأن شخص عربي كتبه (مو كلمة بكلمة ومو إعادة
+  سرد). لا تحذف أي معلومة ولا تضيف أي معلومة أو عبارة من عندك.
+- **ممنوع إضافة عبارات غير موجودة بالنص الأصلي** مثل "أؤكد لكم"، "أبشركم"، "أعلن لكم"، "خبر حصري لكم".
+  اكتب الخبر بشكل اعتيادي مباشر.
+- **الصيغة تبقى نفس صيغة الأصل:** إذا الأصل خبر بصيغة الغائب ("OFFICIAL: Rafa Nadal confirms he's
+  entering Real Madrid Board") فالترجمة خبر عادي بصيغة الغائب: "رسمياً: رافا نادال يؤكد انضمامه إلى مجلس
+  إدارة ريال مدريد". وإذا الأصل فعلاً بصيغة المتكلم ("I can confirm...") ترجمه بصيغة المتكلم. وبكل
+  الأحوال لا تتكلم عن فابريزيو بصيغة الغائب ("قال فابريزيو"، "ينفي فابريزيو").
+- **أمثلة (اتبعها بالضبط):**
+  الأصل: "🚨 OFFICIAL: Rafa Nadal confirms he's entering Real Madrid Board of Directors."
+  صح: "🚨 رسمياً: رافا نادال يؤكد انضمامه إلى مجلس إدارة ريال مدريد."
+  غلط: "🚨 رسمياً: أؤكد لكم انضمام رافا نادال إلى مجلس إدارة ريال مدريد." (أضاف "أؤكد لكم" وغيّر الفاعل)
+  الأصل: "🚨🏴 Harry Kane, set to sign a new deal at FC Bayern soon — valid until June 2029."
+  صح: "🚨🏴 هاري كين على وشك توقيع عقد جديد مع بايرن ميونخ قريباً — ساري حتى يونيو 2029."
+  الأصل: "Here we go! Done deal."  ← صح: "Here we go! الصفقة أُنجزت."
+- **المصطلحات الثابتة:** "OFFICIAL" ← "رسمياً"، "BREAKING" ← "عاجل"، "Here we go" تبقى بالإنجليزي
+  حرفياً بدون ترجمة. الاقتباسات تبقى بين علامتي تنصيص وبنفس ترتيبها، وأسماء اللاعبين والأندية بالشكل
+  العربي المتداول.
+- احذف أي رابط أو إشارة لقناة المصدر نفسها (بما فيها روابط تويتر/X وإشارات "Fabrizio Romano on X").
+  **لا تُبقِ أي رابط إطلاقاً بالنص النهائي** — لا روابط يوتيوب، لا روابط تويتر/X، لا أي رابط آخر.
+  لا تضيف تعليقات من عندك.
+
+النص:
+{text}
+
+أعد النتيجة بصيغة JSON فقط: {{"should_post": true/false, "text": "النص المُعالج"}}"""
     try:
         res = call_gemini(prompt, api_key)
-        out = re.sub(r'https?://\S+', '', (res.get("text") or text).strip())
-        return {"should_post": bool(res.get("should_post", True)), "text": re.sub(r'\n{3,}', '\n\n', out).strip()}
+        out_text = (res.get("text") or text).strip()
+        out_text = re.sub(r'https?://\S+', '', out_text)
+        if not re.search(r"\bI(?:'m| am)? (?:can )?(?:confirm|announce)|\bI(?:'m| am) (?:delighted|happy|excited) to", text, re.IGNORECASE):
+            out_text = re.sub(r'(?:أؤكد|أؤكّد|أبشركم|أعلن|أخبركم|أبلغكم)\s+لكم\s*(?:بأن|أن|أنّ|بأنّ)?[\s،:]*', '', out_text)
+        out_text = re.sub(r'[ \t]{2,}', ' ', out_text)
+        out_text = re.sub(r'\n{3,}', '\n\n', out_text).strip()
+        return {"should_post": bool(res.get("should_post", True)), "text": out_text}
     except Exception as e:
+        print(f"❌ خطأ معالجة فابريزيو: {e}")
         return {"should_post": False, "text": ""}
 
 async def process_batch(source_id, messages):
@@ -150,7 +232,6 @@ async def process_batch(source_id, messages):
         print(f"⏭️ تجاهل — تكرار")
         return
 
-    # تم إصلاح الخطأ هنا (استبدال text بـ cleaned)
     force = bool(re.search(r'here\s*we\s*go', cleaned, re.IGNORECASE)) if cleaned else False
     res = call_fabrizio(cleaned, GEMINI_KEY)
     should_post = (bool(res["text"]) and (res["should_post"] or force))
@@ -161,6 +242,8 @@ async def process_batch(source_id, messages):
 
     record_published_text(source_id, cleaned)
     final_text = res["text"]
+    
+    media_msgs = [m for m in messages if _is_usable_media_msg(m)]
 
     if config.get("skip_if_video") and any(_message_has_any_video(m) for m in messages) and not force:
         print("⏭️ تجاهل — فيديو")
@@ -170,9 +253,17 @@ async def process_batch(source_id, messages):
         return
 
     try:
+        if media_msgs:
+            valid_payloads = [_media_payload(m) for m in media_msgs if _media_payload(m) is not None]
+            if valid_payloads:
+                to_send = valid_payloads[0] if len(valid_payloads) == 1 else valid_payloads
+                await client.send_file(config["target"], to_send, caption=final_text or None, parse_mode="html")
+                print(f"✅ نُشر (صورة + نص) — فابريزيو")
+                return
+                
         if final_text:
             await client.send_message(config["target"], final_text, parse_mode="html", link_preview=False)
-            print(f"✅ نُشر نص — فابريزيو")
+            print(f"✅ نُشر (نص فقط) — فابريزيو")
     except Exception as e:
         print(f"❌ خطأ نشر: {e}")
 
@@ -180,15 +271,21 @@ async def catch_up_channel(source_id):
     config = CHANNELS.get(source_id, {})
     entity_ref = config.get("source_username") or source_id
     key = str(source_id)
-    last_id = state.get(key, 0)
+    
+    if TEST_MODE:
+        print("🧪 وضع التجربة (TEST_MODE) يعمل: سيتم فحص آخر 5 منشورات ونشرها.")
+        last_id = 0 
+    else:
+        last_id = state.get(key, 0)
 
     if last_id == 0:
         latest = await client.get_messages(entity_ref, limit=1)
-        if latest: last_id = max(latest[0].id - 5, 0)
-        state[key] = last_id
-        save_state(state)
-
-    messages = await client.get_messages(entity_ref, min_id=last_id, limit=200)
+        if latest: 
+            last_id = max(latest[0].id - 5, 0) if not TEST_MODE else 0
+        
+    limit = 5 if TEST_MODE else 200
+    messages = await client.get_messages(entity_ref, min_id=last_id, limit=limit)
+    
     if not messages: return
 
     messages = list(reversed(messages))
@@ -206,8 +303,10 @@ async def catch_up_channel(source_id):
             await process_batch(source_id, [msg])
             processed_ids.add(msg.id)
             new_last = msg.id
-        state[key] = new_last
-        save_state(state)
+        
+        if not TEST_MODE:
+            state[key] = new_last
+            save_state(state)
 
 async def main():
     await client.start()
