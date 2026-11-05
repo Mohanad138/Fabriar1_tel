@@ -19,8 +19,7 @@ GEMINI_KEY = os.getenv("GEMINI_KEY_FABRIZ")
 GEMINI_MODEL = "gemini-flash-lite-latest"
 STATE_FILE = "relay_state.json"
 
-# ⚠️ ضعه على True أول مرة لتجربة نشر آخر 5 منشورات (بما فيها الصور)، ثم أرجعه False
-TEST_MODE = True 
+TEST_MODE = False 
 
 CHANNELS = {
     -1001344466508: {
@@ -29,6 +28,7 @@ CHANNELS = {
         "source_username": "@FabrizioRomanoTG",
         "skip_if_video": True,
         "skip_if_youtube": True,
+        "skip_if_play_button": True, # 👈 تم تفعيل فحص أغلفة الفيديو وتجاهلها
     }
 }
 
@@ -78,7 +78,6 @@ def commit_state():
         print(f"⚠️ git error: {e}")
 
 def _is_small_thumbnail_photo(photo):
-    # يستثني صور "الأفاتار" المربعة الصغيرة الخاصة بمعاينة الحساب
     try:
         dims = [(getattr(s, "w", 0), getattr(s, "h", 0)) for s in photo.sizes if hasattr(s, "w")]
         if not dims: return False
@@ -92,7 +91,6 @@ def _is_small_thumbnail_photo(photo):
     except Exception: return False
 
 def _is_usable_media_msg(m):
-    # يجلب أي صورة حقيقية (سواء مرفقة مباشرة أو كمعاينة رابط)
     media = m.media
     if isinstance(media, (MessageMediaPhoto, MessageMediaDocument)): return True
     if isinstance(media, MessageMediaWebPage):
@@ -154,6 +152,34 @@ def call_gemini(prompt, api_key, max_retries=3):
             return json.loads(raw)
         except Exception as e:
             if attempt == max_retries: raise e
+            time.sleep(2 ** attempt)
+
+# ==== فحص زر التشغيل في الصورة بالذكاء الاصطناعي ====
+def check_image_has_play_button(image_path, api_key, max_retries=3):
+    if not api_key: return False
+    try:
+        import base64
+        with open(image_path, "rb") as f: img_b64 = base64.b64encode(f.read()).decode()
+    except Exception: return False
+    mime = "image/png" if image_path.lower().endswith("png") else "image/jpeg"
+    prompt = 'هل يوجد في هذه الصورة زر تشغيل فيديو (مثلث ▶ غالباً داخل دائرة في المنتصف) يدل على أنها غلاف فيديو؟ JSON: {"has_play_button": true/false}'
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent"
+    headers = {"x-goog-api-key": api_key, "Content-Type": "application/json"}
+    body = {"contents": [{"parts": [{"inline_data": {"mime_type": mime, "data": img_b64}}, {"text": prompt}]}]}
+    for attempt in range(1, max_retries + 1):
+        try:
+            resp = requests.post(url, json=body, headers=headers, timeout=30)
+            if resp.status_code in (429, 500, 502, 503, 504) and attempt < max_retries:
+                time.sleep(2 ** attempt)
+                continue
+            resp.raise_for_status()
+            raw = resp.json()["candidates"][0]["content"]["parts"][0]["text"].strip()
+            if raw.startswith("```"):
+                raw = raw.strip("`").strip()
+                if raw.lower().startswith("json"): raw = raw[4:].strip()
+            return bool(json.loads(raw).get("has_play_button", False))
+        except Exception:
+            if attempt == max_retries: return False
             time.sleep(2 ** attempt)
 
 def call_fabrizio(text, api_key):
@@ -251,6 +277,26 @@ async def process_batch(source_id, messages):
     if config.get("skip_if_youtube") and contains_youtube_link(raw_text) and not force:
         print("⏭️ تجاهل — يوتيوب")
         return
+
+    # ==== فحص زر التشغيل في الصور ====
+    if config.get("skip_if_play_button") and not force:
+        first_photo_msg = next((m for m in media_msgs if m.photo), None)
+        if first_photo_msg:
+            tmp_path = None
+            has_play = False
+            try:
+                tmp_path = await client.download_media(first_photo_msg, file="downloads/")
+                if tmp_path:
+                    has_play = check_image_has_play_button(tmp_path, GEMINI_KEY)
+            except Exception as e:
+                print(f"⚠️ خطأ تحميل صورة لفحص زر التشغيل: {e}")
+            finally:
+                if tmp_path and os.path.exists(tmp_path):
+                    try: os.remove(tmp_path)
+                    except OSError: pass
+            if has_play:
+                print(f"⏭️ تجاهل — الصورة غلاف فيديو (تحتوي زر تشغيل)")
+                return
 
     try:
         if media_msgs:
