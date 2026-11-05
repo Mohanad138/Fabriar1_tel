@@ -1,0 +1,46 @@
+name: Fabrizio Relay Bot
+
+on:
+  schedule:
+    - cron: "*/5 * * * *"   # احتياطي كل 5 دقائق
+  workflow_dispatch:
+  repository_dispatch:
+    types: [run-fabrizio]   # رابط خاص لهذا البوت
+
+concurrency:
+  group: fabrizio-bot
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Configure git
+        run: |
+          git config user.name "relay-bot"
+          git config user.email "relay-bot@users.noreply.github.com"
+
+      - name: Run bot
+        env:
+          TG_API_ID: ${{ secrets.TG_API_ID }}
+          TG_API_HASH: ${{ secrets.TG_API_HASH }}
+          TG_SESSION: ${{ secrets.TG_SESSION }}
+          GEMINI_KEY_FABRIZ: ${{ secrets.GEMINI_KEY_FABRIZ }}
+        run: python main.py
