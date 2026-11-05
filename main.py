@@ -150,7 +150,8 @@ async def process_batch(source_id, messages):
         print(f"⏭️ تجاهل — تكرار")
         return
 
-    force = bool(re.search(r'here\s*we\s*go', text, re.IGNORECASE)) if text else False
+    # تم إصلاح الخطأ هنا (استبدال text بـ cleaned)
+    force = bool(re.search(r'here\s*we\s*go', cleaned, re.IGNORECASE)) if cleaned else False
     res = call_fabrizio(cleaned, GEMINI_KEY)
     should_post = (bool(res["text"]) and (res["should_post"] or force))
     
