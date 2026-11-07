@@ -20,7 +20,6 @@ GEMINI_MODEL = "gemini-flash-lite-latest"
 STATE_FILE = "relay_state.json"
 DOWNLOAD_DIR = "downloads"
 
-# إنشاء مجلد التحميل لضمان عدم فشل الكود
 os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 
 TEST_MODE = False 
@@ -51,22 +50,46 @@ def save_state(state):
         json.dump(state, f, ensure_ascii=False, indent=2)
 
 state = load_state()
-DUP_HISTORY_SIZE = 15
-DUP_SIMILARITY_THRESHOLD = 0.82 
+
+# ==== إعدادات منع التكرار (النسخة الاحترافية) ====
+DUP_HISTORY_SIZE = 30
+DUP_SIMILARITY_THRESHOLD = 0.80   
+DUP_OVERLAP_THRESHOLD = 0.85      
+DUP_MIN_TOKENS = 6                
+
+def _norm_for_dup(text):
+    t = text.lower()
+    t = re.sub(r'https?://\S+', ' ', t)
+    t = re.sub(r'[\u064B-\u065F\u0670\u0640]', '', t)
+    t = t.replace('أ', 'ا').replace('إ', 'ا').replace('آ', 'ا').replace('ى', 'ي').replace('ة', 'ه')
+    t = re.sub(r'[^\w\u0600-\u06FF\s]', ' ', t)
+    return re.sub(r'\s+', ' ', t).strip()
+
+def _dup_tokens(norm):
+    return set(re.findall(r'[\w\u0600-\u06FF]{3,}', norm))
 
 def is_duplicate_content(source_id, text):
     if not text or not text.strip(): return False
-    key = str(source_id)
-    recent = state.setdefault("recent_texts", {}).get(key, [])
-    norm = re.sub(r'\s+', ' ', text).strip().lower()
+    norm = _norm_for_dup(text)
+    if not norm: return False
+    new_tokens = _dup_tokens(norm)
+    recent = state.setdefault("recent_texts", {}).get(str(source_id), [])
     for prev in recent:
-        if difflib.SequenceMatcher(None, norm, prev).ratio() >= DUP_SIMILARITY_THRESHOLD: return True
+        prev_norm = _norm_for_dup(prev)
+        if difflib.SequenceMatcher(None, norm, prev_norm).ratio() >= DUP_SIMILARITY_THRESHOLD:
+            return True
+        prev_tokens = _dup_tokens(prev_norm)
+        smaller = min(len(new_tokens), len(prev_tokens))
+        if smaller >= DUP_MIN_TOKENS and len(new_tokens) <= len(prev_tokens) * 1.25:
+            if len(new_tokens & prev_tokens) / smaller >= DUP_OVERLAP_THRESHOLD:
+                return True
     return False
 
 def record_published_text(source_id, text):
     if not text or not text.strip(): return
     key = str(source_id)
-    norm = re.sub(r'\s+', ' ', text).strip().lower()
+    norm = _norm_for_dup(text)
+    if not norm: return
     bucket = state.setdefault("recent_texts", {}).setdefault(key, [])
     bucket.append(norm)
     state["recent_texts"][key] = bucket[-DUP_HISTORY_SIZE:]
@@ -257,8 +280,9 @@ async def process_batch(source_id, messages):
     raw_text = next((m.message for m in messages if m.message), "")
     cleaned = clean_text(raw_text, config.get("source_username"))
 
+    # 1. فحص التكرار (قبل الترجمة)
     if is_duplicate_content(source_id, cleaned):
-        print(f"⏭️ تجاهل — تكرار")
+        print(f"⏭️ تجاهل — النص الأصلي مكرر")
         return
 
     force = bool(re.search(r'here\s*we\s*go', cleaned, re.IGNORECASE)) if cleaned else False
@@ -269,8 +293,15 @@ async def process_batch(source_id, messages):
         print("⏭️ تجاهل — فلترة فابريزيو")
         return
 
-    record_published_text(source_id, cleaned)
     final_text = res["text"]
+
+    # 2. فحص التكرار (بعد الترجمة) - هذا هو السر لمنع تكرار الصور المختلفة لنفس الخبر
+    if is_duplicate_content(f"{source_id}_final", final_text):
+        print(f"⏭️ تجاهل — الترجمة النهائية مكررة")
+        return
+
+    record_published_text(source_id, cleaned)
+    record_published_text(f"{source_id}_final", final_text)
     
     media_msgs = [m for m in messages if _is_usable_media_msg(m)]
 
@@ -287,7 +318,6 @@ async def process_batch(source_id, messages):
             tmp_path = None
             has_play = False
             try:
-                # استخدام المتغير DOWNLOAD_DIR بدلاً من الكتابة اليدوية
                 tmp_path = await client.download_media(first_photo_msg, file=f"{DOWNLOAD_DIR}/")
                 if tmp_path:
                     has_play = check_image_has_play_button(tmp_path, GEMINI_KEY)
