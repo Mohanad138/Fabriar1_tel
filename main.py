@@ -18,6 +18,10 @@ GEMINI_KEY = os.getenv("GEMINI_KEY_FABRIZ")
 
 GEMINI_MODEL = "gemini-flash-lite-latest"
 STATE_FILE = "relay_state.json"
+DOWNLOAD_DIR = "downloads"
+
+# إنشاء مجلد التحميل لضمان عدم فشل الكود
+os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 
 TEST_MODE = False 
 
@@ -28,7 +32,7 @@ CHANNELS = {
         "source_username": "@FabrizioRomanoTG",
         "skip_if_video": True,
         "skip_if_youtube": True,
-        "skip_if_play_button": True, # 👈 تم تفعيل فحص أغلفة الفيديو وتجاهلها
+        "skip_if_play_button": True,
     }
 }
 
@@ -154,7 +158,6 @@ def call_gemini(prompt, api_key, max_retries=3):
             if attempt == max_retries: raise e
             time.sleep(2 ** attempt)
 
-# ==== فحص زر التشغيل في الصورة بالذكاء الاصطناعي ====
 def check_image_has_play_button(image_path, api_key, max_retries=3):
     if not api_key: return False
     try:
@@ -278,14 +281,14 @@ async def process_batch(source_id, messages):
         print("⏭️ تجاهل — يوتيوب")
         return
 
-    # ==== فحص زر التشغيل في الصور ====
     if config.get("skip_if_play_button") and not force:
         first_photo_msg = next((m for m in media_msgs if m.photo), None)
         if first_photo_msg:
             tmp_path = None
             has_play = False
             try:
-                tmp_path = await client.download_media(first_photo_msg, file="downloads/")
+                # استخدام المتغير DOWNLOAD_DIR بدلاً من الكتابة اليدوية
+                tmp_path = await client.download_media(first_photo_msg, file=f"{DOWNLOAD_DIR}/")
                 if tmp_path:
                     has_play = check_image_has_play_button(tmp_path, GEMINI_KEY)
             except Exception as e:
