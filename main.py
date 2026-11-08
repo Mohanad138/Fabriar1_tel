@@ -18,10 +18,6 @@ GEMINI_KEY = os.getenv("GEMINI_KEY_FABRIZ")
 
 GEMINI_MODEL = "gemini-flash-lite-latest"
 STATE_FILE = "relay_state.json"
-DOWNLOAD_DIR = "downloads"
-
-os.makedirs(DOWNLOAD_DIR, exist_ok=True)
-
 TEST_MODE = False 
 
 CHANNELS = {
@@ -31,7 +27,7 @@ CHANNELS = {
         "source_username": "@FabrizioRomanoTG",
         "skip_if_video": True,
         "skip_if_youtube": True,
-        "skip_if_play_button": True,
+        "skip_if_play_button": True, 
     }
 }
 
@@ -40,59 +36,31 @@ client = TelegramClient(StringSession(TG_SESSION), TG_API_ID, TG_API_HASH)
 def load_state():
     if os.path.exists(STATE_FILE):
         try:
-            with open(STATE_FILE, "r", encoding="utf-8") as f:
-                return json.load(f)
+            with open(STATE_FILE, "r", encoding="utf-8") as f: return json.load(f)
         except Exception: return {}
     return {}
 
 def save_state(state):
-    with open(STATE_FILE, "w", encoding="utf-8") as f:
-        json.dump(state, f, ensure_ascii=False, indent=2)
+    with open(STATE_FILE, "w", encoding="utf-8") as f: json.dump(state, f, ensure_ascii=False, indent=2)
 
 state = load_state()
 
-# ==== إعدادات منع التكرار (النسخة الاحترافية) ====
-DUP_HISTORY_SIZE = 30
-DUP_SIMILARITY_THRESHOLD = 0.80   
-DUP_OVERLAP_THRESHOLD = 0.85      
-DUP_MIN_TOKENS = 6                
-
-def _norm_for_dup(text):
-    t = text.lower()
-    t = re.sub(r'https?://\S+', ' ', t)
-    t = re.sub(r'[\u064B-\u065F\u0670\u0640]', '', t)
-    t = t.replace('أ', 'ا').replace('إ', 'ا').replace('آ', 'ا').replace('ى', 'ي').replace('ة', 'ه')
-    t = re.sub(r'[^\w\u0600-\u06FF\s]', ' ', t)
-    return re.sub(r'\s+', ' ', t).strip()
-
-def _dup_tokens(norm):
-    return set(re.findall(r'[\w\u0600-\u06FF]{3,}', norm))
-
 def is_duplicate_content(source_id, text):
     if not text or not text.strip(): return False
-    norm = _norm_for_dup(text)
-    if not norm: return False
-    new_tokens = _dup_tokens(norm)
-    recent = state.setdefault("recent_texts", {}).get(str(source_id), [])
+    key = str(source_id)
+    recent = state.setdefault("recent_texts", {}).get(key, [])
+    norm = re.sub(r'\s+', ' ', text).strip().lower()
     for prev in recent:
-        prev_norm = _norm_for_dup(prev)
-        if difflib.SequenceMatcher(None, norm, prev_norm).ratio() >= DUP_SIMILARITY_THRESHOLD:
-            return True
-        prev_tokens = _dup_tokens(prev_norm)
-        smaller = min(len(new_tokens), len(prev_tokens))
-        if smaller >= DUP_MIN_TOKENS and len(new_tokens) <= len(prev_tokens) * 1.25:
-            if len(new_tokens & prev_tokens) / smaller >= DUP_OVERLAP_THRESHOLD:
-                return True
+        if difflib.SequenceMatcher(None, norm, prev).ratio() >= 0.82: return True
     return False
 
 def record_published_text(source_id, text):
     if not text or not text.strip(): return
     key = str(source_id)
-    norm = _norm_for_dup(text)
-    if not norm: return
+    norm = re.sub(r'\s+', ' ', text).strip().lower()
     bucket = state.setdefault("recent_texts", {}).setdefault(key, [])
     bucket.append(norm)
-    state["recent_texts"][key] = bucket[-DUP_HISTORY_SIZE:]
+    state["recent_texts"][key] = bucket[-15:]
     save_state(state)
 
 def commit_state():
@@ -101,8 +69,7 @@ def commit_state():
         subprocess.run(["git", "commit", "-m", "update relay state"], check=False, capture_output=True)
         subprocess.run(["git", "pull", "--rebase", "origin", "main"], check=False, capture_output=True)
         subprocess.run(["git", "push"], check=False, capture_output=True)
-    except Exception as e:
-        print(f"⚠️ git error: {e}")
+    except Exception: pass
 
 def _is_small_thumbnail_photo(photo):
     try:
@@ -188,7 +155,7 @@ def check_image_has_play_button(image_path, api_key, max_retries=3):
         with open(image_path, "rb") as f: img_b64 = base64.b64encode(f.read()).decode()
     except Exception: return False
     mime = "image/png" if image_path.lower().endswith("png") else "image/jpeg"
-    prompt = 'هل يوجد في هذه الصورة زر تشغيل فيديو (مثلث ▶ غالباً داخل دائرة في المنتصف) يدل على أنها غلاف فيديو؟ JSON: {"has_play_button": true/false}'
+    prompt = 'هل يوجد زر تشغيل فيديو (▶) بالصورة؟ JSON: {"has_play_button": true/false}'
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent"
     headers = {"x-goog-api-key": api_key, "Content-Type": "application/json"}
     body = {"contents": [{"parts": [{"inline_data": {"mime_type": mime, "data": img_b64}}, {"text": prompt}]}]}
@@ -196,8 +163,7 @@ def check_image_has_play_button(image_path, api_key, max_retries=3):
         try:
             resp = requests.post(url, json=body, headers=headers, timeout=30)
             if resp.status_code in (429, 500, 502, 503, 504) and attempt < max_retries:
-                time.sleep(2 ** attempt)
-                continue
+                time.sleep(2 ** attempt); continue
             resp.raise_for_status()
             raw = resp.json()["candidates"][0]["content"]["parts"][0]["text"].strip()
             if raw.startswith("```"):
@@ -212,49 +178,18 @@ def call_fabrizio(text, api_key):
     prompt = f"""أنت محرر لصفحة عربية تنقل كل منشورات حساب فابريزيو رومانو الرسمي بالعربية.
 
 معايير النشر (فلتر معتدل — مو صارم ومو مفتوح بالكامل):
-- انشر (should_post = true) أي منشور فيه **معلومة كروية ملموسة وجديدة** عن لاعب أو مدرب أو نادي محدد:
-  انتقال أو صفقة أو تجديد عقد (مع مرحلة واضحة: مفاوضات متقدمة، اتفاق، رسمي)، إصابة أو غياب لاعب مهم،
-  تشكيلة أو نتيجة مباراة أو حدث مهم بمباراة، قرار أو إعلان رسمي، تصريح له قيمة إخبارية فعلية،
-  إحصائية لافتة، أو تغيير مدرب/إدارة.
-- **أخبار الجوائز الفردية دايماً تُنشر**: الكرة الذهبية (Ballon d'Or)، أفضل لاعب، أي جائزة فردية —
-  فوز، ترشيح، توقع، تحليل — حتى لو كان النص قصير أو بصيغة "BREAKING" أو بأحرف كبيرة.
+- انشر (should_post = true) أي منشور فيه **معلومة كروية ملموسة وجديدة** عن لاعب أو مدرب أو نادي محدد.
+- **أخبار الجوائز الفردية دايماً تُنشر**.
 - أي منشور يحتوي على عبارة "Here we go" يُنشر دائماً بلا استثناء.
-- اجعل should_post = false للأنواع التالية فقط (هامشية أو بلا قيمة إخبارية):
-  * إعلان تجاري مدفوع أو ترويج لمنتج/تطبيق/خدمة/رعاية.
-  * ترويج لبودكاست/برنامج فابريزيو نفسه (زي "New pod on"، دعوة للاستماع).
-  * تشويق بلا معلومة فعلية ("more to follow"، "big news coming"، "talks ongoing" بدون أي تفصيل
-    أو مرحلة أو اسم محدد).
-  * منشورات تفاعلية/ترفيهية بلا خبر: تهنئة، عيد ميلاد، احتفال، ردود فعل جماهير، دردشة، طرائف.
-  * رأي أو تحليل عام بلا حقيقة جديدة، أو تكرار لمعلومة معروفة سبق نشرها بدون أي جديد.
-  * أي محتوى بعيد عن كرة القدم أو شخصي.
-- قرار الفيديو والصور يتخذ بشكل منفصل بالكود، مو من عندك — لا تجعل should_post = false بسبب إن
-  المنشور "يشبه فيديو" أو قصير. خبر قصير حقيقي (فوز بجائزة، نتيجة، صفقة) يبقى should_post = true.
-- عند الشك بين خبر حقيقي متوسط الأهمية وخبر هامشي: إذا فيه اسم محدد + تطور فعلي → انشر، وإذا ما فيه
-  إلا انطباع أو تشويق عام → لا تنشر.
+- اجعل should_post = false للإعلانات المدفوعة، الترويج لبرامجه، التشويق بلا معلومة، أو المنشورات الترفيهية.
+- عند الشك انشر.
 
 الترجمة (فقط إذا should_post = true):
-- **أمانة كاملة للنص الأصلي:** اكتب الخبر بنفس معناه ونفس ترتيب أفكاره وفقراته وأسطره وإيموجياته
-  بالضبط كما كتبه فابريزيو بحسابه الأصلي، بس بعربي طبيعي كأن شخص عربي كتبه (مو كلمة بكلمة ومو إعادة
-  سرد). لا تحذف أي معلومة ولا تضيف أي معلومة أو عبارة من عندك.
-- **ممنوع إضافة عبارات غير موجودة بالنص الأصلي** مثل "أؤكد لكم"، "أبشركم"، "أعلن لكم"، "خبر حصري لكم".
-  اكتب الخبر بشكل اعتيادي مباشر.
-- **الصيغة تبقى نفس صيغة الأصل:** إذا الأصل خبر بصيغة الغائب ("OFFICIAL: Rafa Nadal confirms he's
-  entering Real Madrid Board") فالترجمة خبر عادي بصيغة الغائب: "رسمياً: رافا نادال يؤكد انضمامه إلى مجلس
-  إدارة ريال مدريد". وإذا الأصل فعلاً بصيغة المتكلم ("I can confirm...") ترجمه بصيغة المتكلم. وبكل
-  الأحوال لا تتكلم عن فابريزيو بصيغة الغائب ("قال فابريزيو"، "ينفي فابريزيو").
-- **أمثلة (اتبعها بالضبط):**
-  الأصل: "🚨 OFFICIAL: Rafa Nadal confirms he's entering Real Madrid Board of Directors."
-  صح: "🚨 رسمياً: رافا نادال يؤكد انضمامه إلى مجلس إدارة ريال مدريد."
-  غلط: "🚨 رسمياً: أؤكد لكم انضمام رافا نادال إلى مجلس إدارة ريال مدريد." (أضاف "أؤكد لكم" وغيّر الفاعل)
-  الأصل: "🚨🏴 Harry Kane, set to sign a new deal at FC Bayern soon — valid until June 2029."
-  صح: "🚨🏴 هاري كين على وشك توقيع عقد جديد مع بايرن ميونخ قريباً — ساري حتى يونيو 2029."
-  الأصل: "Here we go! Done deal."  ← صح: "Here we go! الصفقة أُنجزت."
-- **المصطلحات الثابتة:** "OFFICIAL" ← "رسمياً"، "BREAKING" ← "عاجل"، "Here we go" تبقى بالإنجليزي
-  حرفياً بدون ترجمة. الاقتباسات تبقى بين علامتي تنصيص وبنفس ترتيبها، وأسماء اللاعبين والأندية بالشكل
-  العربي المتداول.
-- احذف أي رابط أو إشارة لقناة المصدر نفسها (بما فيها روابط تويتر/X وإشارات "Fabrizio Romano on X").
-  **لا تُبقِ أي رابط إطلاقاً بالنص النهائي** — لا روابط يوتيوب، لا روابط تويتر/X، لا أي رابط آخر.
-  لا تضيف تعليقات من عندك.
+- **أمانة كاملة للنص الأصلي:** اكتب الخبر بنفس معناه ونفس ترتيب أفكاره وفقراته وأسطره وإيموجياته بالضبط كما كتبه فابريزيو، بس بعربي طبيعي.
+- **ممنوع إضافة عبارات غير موجودة بالنص الأصلي** مثل "أؤكد لكم"، "أبشركم". اكتب الخبر بشكل اعتيادي مباشر.
+- **الصيغة تبقى نفس صيغة الأصل:** إذا الأصل خبر بصيغة الغائب، فالترجمة بصيغة الغائب. وإذا كان بصيغة المتكلم، ترجمه بصيغة المتكلم. لا تتكلم عن فابريزيو بصيغة الغائب أبداً.
+- **المصطلحات الثابتة:** "OFFICIAL" ← "رسمياً"، "BREAKING" ← "عاجل"، "Here we go" تبقى بالإنجليزي.
+- **لا تُبقِ أي رابط إطلاقاً بالنص النهائي**.
 
 النص:
 {text}
@@ -280,9 +215,8 @@ async def process_batch(source_id, messages):
     raw_text = next((m.message for m in messages if m.message), "")
     cleaned = clean_text(raw_text, config.get("source_username"))
 
-    # 1. فحص التكرار (قبل الترجمة)
     if is_duplicate_content(source_id, cleaned):
-        print(f"⏭️ تجاهل — النص الأصلي مكرر")
+        print(f"⏭️ تجاهل — تكرار")
         return
 
     force = bool(re.search(r'here\s*we\s*go', cleaned, re.IGNORECASE)) if cleaned else False
@@ -293,15 +227,8 @@ async def process_batch(source_id, messages):
         print("⏭️ تجاهل — فلترة فابريزيو")
         return
 
-    final_text = res["text"]
-
-    # 2. فحص التكرار (بعد الترجمة) - هذا هو السر لمنع تكرار الصور المختلفة لنفس الخبر
-    if is_duplicate_content(f"{source_id}_final", final_text):
-        print(f"⏭️ تجاهل — الترجمة النهائية مكررة")
-        return
-
     record_published_text(source_id, cleaned)
-    record_published_text(f"{source_id}_final", final_text)
+    final_text = res["text"]
     
     media_msgs = [m for m in messages if _is_usable_media_msg(m)]
 
@@ -318,20 +245,19 @@ async def process_batch(source_id, messages):
             tmp_path = None
             has_play = False
             try:
-                tmp_path = await client.download_media(first_photo_msg, file=f"{DOWNLOAD_DIR}/")
-                if tmp_path:
-                    has_play = check_image_has_play_button(tmp_path, GEMINI_KEY)
-            except Exception as e:
-                print(f"⚠️ خطأ تحميل صورة لفحص زر التشغيل: {e}")
+                tmp_path = await client.download_media(first_photo_msg, file="downloads/")
+                if tmp_path: has_play = check_image_has_play_button(tmp_path, GEMINI_KEY)
+            except Exception: pass
             finally:
                 if tmp_path and os.path.exists(tmp_path):
                     try: os.remove(tmp_path)
                     except OSError: pass
             if has_play:
-                print(f"⏭️ تجاهل — الصورة غلاف فيديو (تحتوي زر تشغيل)")
+                print(f"⏭️ تجاهل — الصورة غلاف فيديو")
                 return
 
     try:
+        # النشر (سواء كان هناك صورة أو نص فقط)
         if media_msgs:
             valid_payloads = [_media_payload(m) for m in media_msgs if _media_payload(m) is not None]
             if valid_payloads:
@@ -352,7 +278,6 @@ async def catch_up_channel(source_id):
     key = str(source_id)
     
     if TEST_MODE:
-        print("🧪 وضع التجربة (TEST_MODE) يعمل: سيتم فحص آخر 5 منشورات ونشرها.")
         last_id = 0 
     else:
         last_id = state.get(key, 0)
