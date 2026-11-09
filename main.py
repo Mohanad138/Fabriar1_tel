@@ -15,15 +15,13 @@ TG_API_ID = int(os.getenv("TG_API_ID"))
 TG_API_HASH = os.getenv("TG_API_HASH")
 TG_SESSION = os.getenv("TG_SESSION")
 
-# تم التغيير إلى مفتاح Groq
+# استخدام مفتاح Groq
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 GROQ_MODEL = "llama-3.3-70b-versatile"
 
 STATE_FILE = "relay_state.json"
 DOWNLOAD_DIR = "downloads"
 os.makedirs(DOWNLOAD_DIR, exist_ok=True)
-
-TEST_MODE = False 
 
 CHANNELS = {
     -1001344466508: {
@@ -32,7 +30,7 @@ CHANNELS = {
         "source_username": "@FabrizioRomanoTG",
         "skip_if_video": True,
         "skip_if_youtube": True,
-        "skip_if_play_button": True, 
+        # تم إلغاء شرط تجاهل أغلفة الفيديو
     }
 }
 
@@ -132,7 +130,6 @@ def clean_text(text, source_username=None):
     while lines and not re.search(r'[A-Za-z\u0600-\u06FF0-9]', lines[-1]): lines.pop()
     return '\n'.join(lines).rstrip()
 
-# ==== دالة Groq ====
 def call_groq(prompt, max_retries=3):
     if not GROQ_API_KEY: raise RuntimeError("no groq key")
     url = "https://api.groq.com/openai/v1/chat/completions"
@@ -210,9 +207,6 @@ async def process_batch(source_id, messages):
     if config.get("skip_if_video") and any(_message_has_any_video(m) for m in messages) and not force: return
     if config.get("skip_if_youtube") and contains_youtube_link(raw_text) and not force: return
 
-    # ملاحظة: تم إلغاء فحص أغلفة الفيديو بالذكاء الاصطناعي لتسريع البوت
-    # (لأنه كان يسبب تحميل الصور وفحصها مما يبطئ التشغيل)
-
     try:
         if media_msgs:
             valid_payloads = [_media_payload(m) for m in media_msgs if _media_payload(m) is not None]
@@ -220,13 +214,13 @@ async def process_batch(source_id, messages):
                 to_send = valid_payloads[0] if len(valid_payloads) == 1 else valid_payloads
                 await client.send_file(config["target"], to_send, caption=final_text or None, parse_mode="html")
                 print(f"✅ نُشر (صورة + نص) — فابريزيو")
-                commit_state() # الحفظ الفوري
+                commit_state()
                 return
                 
         if final_text:
             await client.send_message(config["target"], final_text, parse_mode="html", link_preview=False)
             print(f"✅ نُشر (نص فقط) — فابريزيو")
-            commit_state() # الحفظ الفوري
+            commit_state()
     except Exception as e:
         print(f"❌ خطأ نشر: {e}")
 
