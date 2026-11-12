@@ -14,11 +14,10 @@ import requests
 TG_API_ID = int(os.getenv("TG_API_ID"))
 TG_API_HASH = os.getenv("TG_API_HASH")
 TG_SESSION = os.getenv("TG_SESSION")
+GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 
-# العودة إلى مفتاح Gemini
-GEMINI_KEY = os.getenv("GEMINI_KEY_FABRIZ")
-
-GEMINI_MODEL = "gemini-flash-lite-latest"
+# استخدام نموذج Groq المستقر
+GROQ_MODEL = "openai/gpt-oss-120b"
 STATE_FILE = "relay_state.json"
 DOWNLOAD_DIR = "downloads"
 os.makedirs(DOWNLOAD_DIR, exist_ok=True)
@@ -32,7 +31,7 @@ CHANNELS = {
         "source_username": "@FabrizioRomanoTG",
         "skip_if_video": True,
         "skip_if_youtube": True,
-        "skip_if_play_button": True, # تفعيل فحص أغلفة الفيديو
+        "skip_if_play_button": True, 
     }
 }
 
@@ -124,62 +123,33 @@ def clean_text(text, source_username=None):
     cleaned = re.sub(r'(https?://)?t\.me/\S+', '', cleaned, flags=re.IGNORECASE)
     cleaned = re.sub(r'https?://t\.co/\S+', '', cleaned, flags=re.IGNORECASE)
     cleaned = re.sub(r'(?i)forwarded from.*', '', cleaned)
-    cleaned = re.sub(r'(?i)read\s*more\.?\s*$', '', cleaned.rstrip())
-    cleaned = re.sub(r'اقرأ\s*المزيد\.?\s*$', '', cleaned.rstrip())
-    cleaned = re.sub(r'أعيد التوجيه من.*', '', cleaned)
+    
+    # 🛠️ الفلتر الجديد: حذف توقيع فابريزيو والتاريخ من النص
+    cleaned = re.sub(r'[—–-]\s*Fabrizio Romano\s*\(@FabrizioRomano\)\s*(?:[A-Z][a-z]{2,8}\.?\s*\d{1,2},\s*\d{4})?', '', cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r'[—–-]\s*فابريزيو رومانو\s*\(@FabrizioRomano\)\s*(?:[A-Z][a-z]{2,8}\.?\s*\d{1,2},\s*\d{4})?', '', cleaned, flags=re.IGNORECASE)
+    
     cleaned = re.sub(r'\n{3,}', '\n\n', cleaned).strip()
     lines = cleaned.split('\n')
     while lines and not re.search(r'[A-Za-z\u0600-\u06FF0-9]', lines[-1]): lines.pop()
     return '\n'.join(lines).rstrip()
 
-def call_gemini(prompt, api_key, max_retries=3):
-    if not api_key: raise RuntimeError("no gemini key")
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent"
-    headers = {"x-goog-api-key": api_key, "Content-Type": "application/json"}
-    body = {"contents": [{"parts": [{"text": prompt}]}]}
-    for attempt in range(1, max_retries + 1):
-        try:
-            resp = requests.post(url, json=body, headers=headers, timeout=30)
-            if resp.status_code in (429, 500, 502, 503, 504) and attempt < max_retries:
-                time.sleep(2 ** attempt)
-                continue
-            resp.raise_for_status()
-            raw = resp.json()["candidates"][0]["content"]["parts"][0]["text"].strip()
-            if raw.startswith("```"):
-                raw = raw.strip("`").strip()
-                if raw.lower().startswith("json"): raw = raw[4:].strip()
-            return json.loads(raw)
-        except Exception as e:
-            if attempt == max_retries: raise e
-            time.sleep(2 ** attempt)
-
-def check_image_has_play_button(image_path, api_key, max_retries=3):
-    if not api_key: return False
-    try:
-        import base64
-        with open(image_path, "rb") as f: img_b64 = base64.b64encode(f.read()).decode()
-    except Exception: return False
-    mime = "image/png" if image_path.lower().endswith("png") else "image/jpeg"
-    prompt = 'هل يوجد زر تشغيل فيديو (▶) بالصورة؟ JSON: {"has_play_button": true/false}'
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent"
-    headers = {"x-goog-api-key": api_key, "Content-Type": "application/json"}
-    body = {"contents": [{"parts": [{"inline_data": {"mime_type": mime, "data": img_b64}}, {"text": prompt}]}]}
+def call_groq(prompt, max_retries=3):
+    if not GROQ_API_KEY: raise RuntimeError("no groq key")
+    url = "https://api.groq.com/openai/v1/chat/completions"
+    headers = {"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"}
+    body = {"model": GROQ_MODEL, "messages": [{"role": "user", "content": prompt}], "temperature": 0.3}
     for attempt in range(1, max_retries + 1):
         try:
             resp = requests.post(url, json=body, headers=headers, timeout=30)
             if resp.status_code in (429, 500, 502, 503, 504) and attempt < max_retries:
                 time.sleep(2 ** attempt); continue
             resp.raise_for_status()
-            raw = resp.json()["candidates"][0]["content"]["parts"][0]["text"].strip()
-            if raw.startswith("```"):
-                raw = raw.strip("`").strip()
-                if raw.lower().startswith("json"): raw = raw[4:].strip()
-            return bool(json.loads(raw).get("has_play_button", False))
-        except Exception:
-            if attempt == max_retries: return False
+            return resp.json()["choices"][0]["message"]["content"].strip()
+        except Exception as e:
+            if attempt == max_retries: raise e
             time.sleep(2 ** attempt)
 
-def call_fabrizio(text, api_key):
+def call_fabrizio(text):
     prompt = f"""أنت محرر لصفحة عربية تنقل كل منشورات حساب فابريزيو رومانو الرسمي بالعربية.
 
 معايير النشر (فلتر معتدل — مو صارم ومو مفتوح بالكامل):
@@ -194,20 +164,30 @@ def call_fabrizio(text, api_key):
 - **ممنوع إضافة عبارات غير موجودة بالنص الأصلي** مثل "أؤكد لكم"، "أبشركم". اكتب الخبر بشكل اعتيادي مباشر.
 - **الصيغة تبقى نفس صيغة الأصل:** إذا الأصل خبر بصيغة الغائب، فالترجمة بصيغة الغائب. وإذا كان بصيغة المتكلم، ترجمه بصيغة المتكلم.
 - **المصطلحات الثابتة:** "OFFICIAL" ← "رسمياً"، "BREAKING" ← "عاجل"، "Here we go" تبقى بالإنجليزي.
-- **لا تُبقِ أي رابط إطلاقاً بالنص النهائي**.
+- **لا تُبقِ أي رابط إطلاقاً بالنص النهائي، ولا تضع أي توقيع أو تاريخ في النهاية.**
 
 النص:
 {text}
 
 أعد النتيجة بصيغة JSON فقط: {{"should_post": true/false, "text": "النص المُعالج"}}"""
     try:
-        res = call_gemini(prompt, api_key)
+        res_raw = call_groq(prompt)
+        if res_raw.startswith("```"):
+            res_raw = res_raw.strip("`").strip()
+            if res_raw.lower().startswith("json"): res_raw = res_raw[4:].strip()
+        res = json.loads(res_raw)
         out_text = (res.get("text") or text).strip()
+        
+        # تنظيف إضافي احتياطي لقطع أي روابط متبقية
         out_text = re.sub(r'https?://\S+', '', out_text)
+        
+        # إزالة أي حشو إضافي
         if not re.search(r"\bI(?:'m| am)? (?:can )?(?:confirm|announce)|\bI(?:'m| am) (?:delighted|happy|excited) to", text, re.IGNORECASE):
             out_text = re.sub(r'(?:أؤكد|أؤكّد|أبشركم|أعلن|أخبركم|أبلغكم)\s+لكم\s*(?:بأن|أن|أنّ|بأنّ)?[\s،:]*', '', out_text)
+            
         out_text = re.sub(r'[ \t]{2,}', ' ', out_text)
         out_text = re.sub(r'\n{3,}', '\n\n', out_text).strip()
+        
         return {"should_post": bool(res.get("should_post", True)), "text": out_text}
     except Exception as e:
         print(f"❌ خطأ معالجة فابريزيو: {e}")
@@ -223,7 +203,7 @@ async def process_batch(source_id, messages):
     if is_duplicate_content(source_id, cleaned): return
 
     force = bool(re.search(r'here\s*we\s*go', cleaned, re.IGNORECASE)) if cleaned else False
-    res = call_fabrizio(cleaned, GEMINI_KEY)
+    res = call_fabrizio(cleaned)
     should_post = (bool(res["text"]) and (res["should_post"] or force))
     
     if not should_post: return
@@ -233,25 +213,12 @@ async def process_batch(source_id, messages):
     
     media_msgs = [m for m in messages if _is_usable_media_msg(m)]
 
-    if config.get("skip_if_video") and any(_message_has_any_video(m) for m in messages) and not force: return
-    if config.get("skip_if_youtube") and contains_youtube_link(raw_text) and not force: return
-
-    if config.get("skip_if_play_button") and not force:
-        first_photo_msg = next((m for m in media_msgs if m.photo), None)
-        if first_photo_msg:
-            tmp_path = None
-            has_play = False
-            try:
-                tmp_path = await client.download_media(first_photo_msg, file=f"{DOWNLOAD_DIR}/")
-                if tmp_path: has_play = check_image_has_play_button(tmp_path, GEMINI_KEY)
-            except Exception: pass
-            finally:
-                if tmp_path and os.path.exists(tmp_path):
-                    try: os.remove(tmp_path)
-                    except OSError: pass
-            if has_play:
-                print(f"⏭️ تجاهل — الصورة غلاف فيديو")
-                return
+    if config.get("skip_if_video") and any(_message_has_any_video(m) for m in messages) and not force:
+        print("⏭️ تجاهل — فيديو")
+        return
+    if config.get("skip_if_youtube") and contains_youtube_link(raw_text) and not force:
+        print("⏭️ تجاهل — يوتيوب")
+        return
 
     try:
         if media_msgs:
